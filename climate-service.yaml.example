@@ -57,6 +57,6 @@ data_dir: ./data   # required — directory for downloaded NetCDF files and Zarr
 #         data_element_id: BXgDHhPdFVU
 #         period_type: day
 
-# plugins_dir: ./plugins/   # optional — plugin root: YAML templates in plugins/datasets/, Python modules importable by dotted path
+plugins_dir: ./plugins/   # DRC weekly climate and vegetation templates live in plugins/datasets/
 # crs: EPSG:4326             # optional — CRS for stored GeoZarr files (default: EPSG:4326); use e.g. EPSG:25833 for UTM33
 # utc_offset_hours: 0        # optional — UTC offset in hours for local-day aggregation in daily_from_hourly datasets (default: 0 = UTC)

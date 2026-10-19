@@ -1,0 +1,273 @@
+- id: chirps3_precipitation_weekly
+  name: Weekly precipitation total (CHIRPS3)
+  short_name: Weekly precipitation
+  description: Seven-day CHIRPS3 precipitation total for complete ISO weeks.
+  standard_name: lwe_thickness_of_precipitation_amount
+  variable: precip
+  period_type: weekly
+  sync: {kind: temporal, execution: append}
+  extents:
+    spatial: {bbox: [-180, -50, 180, 50]}
+    temporal: {begin: "1981-01-05", resolution: P1W}
+  ingestion:
+    plugin: datasets.drc_weekly.CHIRPS3PrecipitationWeeklyPlugin
+  units: mm
+  cell_methods: "time: sum"
+  resolution: 5 km x 5 km
+  source: CHIRPS v3 daily
+  source_url: https://www.chc.ucsb.edu/data/chirps3
+  license: CC-BY-4.0
+  providers:
+    - {name: UCSB Climate Hazards Center, url: https://www.chc.ucsb.edu/data/chirps}
+  display: {colormap: blues, range: [0.0, 140.0], nodata: -9999.0}
+
+- id: era5land_precipitation_weekly
+  name: Weekly precipitation total (ERA5-Land)
+  short_name: Weekly precipitation
+  description: Seven-day ERA5-Land precipitation total for complete ISO weeks.
+  standard_name: lwe_thickness_of_precipitation_amount
+  variable: tp
+  period_type: weekly
+  sync: {kind: temporal, execution: append}
+  extents:
+    spatial: {bbox: [-180, -90, 180, 90]}
+    temporal: {begin: "1950-01-02", resolution: P1W}
+  ingestion:
+    plugin: datasets.drc_weekly.ERA5LandPrecipitationWeeklyPlugin
+  units: mm
+  cell_methods: "time: sum"
+  resolution: 9 km x 9 km
+  source: ERA5-Land Reanalysis
+  source_url: https://cds.climate.copernicus.eu/datasets/reanalysis-era5-land
+  license: {name: Licence to Use Copernicus Products, url: https://apps.ecmwf.int/datasets/licences/copernicus/}
+  providers: &copernicus_provider
+    - {name: Copernicus Climate Change Service (C3S), url: https://climate.copernicus.eu/}
+  display: {colormap: blues, range: [0.0, 140.0], nodata: -9999.0}
+
+- id: era5land_temperature_weekly
+  name: Weekly mean 2m air temperature (ERA5-Land)
+  short_name: Mean temperature
+  description: Mean of the seven ERA5-Land daily mean temperatures in each complete ISO week.
+  standard_name: air_temperature
+  variable: t2m
+  period_type: weekly
+  sync: {kind: temporal, execution: append}
+  extents:
+    spatial: {bbox: [-180, -90, 180, 90]}
+    temporal: {begin: "1950-01-02", resolution: P1W}
+  ingestion:
+    plugin: datasets.drc_weekly.ERA5LandTemperatureWeeklyPlugin
+  units: degC
+  cell_methods: "time: mean"
+  resolution: 9 km x 9 km
+  source: ERA5-Land Reanalysis
+  source_url: https://cds.climate.copernicus.eu/datasets/derived-era5-land-daily-statistics
+  license: &copernicus_license {name: Licence to Use Copernicus Products, url: https://apps.ecmwf.int/datasets/licences/copernicus/}
+  providers: *copernicus_provider
+  display: &temperature_display {colormap: rdbu_r, range: [-30.0, 50.0], nodata: -9999.0}
+
+- id: era5land_temperature_max_weekly
+  name: Weekly maximum 2m air temperature (ERA5-Land)
+  short_name: Maximum temperature
+  description: Maximum of ERA5-Land daily maximum temperatures in each complete ISO week.
+  standard_name: air_temperature
+  variable: t2m_max
+  period_type: weekly
+  sync: {kind: temporal, execution: append}
+  extents:
+    spatial: {bbox: [-180, -90, 180, 90]}
+    temporal: {begin: "1950-01-02", resolution: P1W}
+  ingestion:
+    plugin: datasets.drc_weekly.ERA5LandTemperatureMaxWeeklyPlugin
+  units: degC
+  cell_methods: "time: maximum"
+  resolution: 9 km x 9 km
+  source: ERA5-Land daily statistics
+  source_url: https://cds.climate.copernicus.eu/datasets/derived-era5-land-daily-statistics
+  license: *copernicus_license
+  providers: *copernicus_provider
+  display: *temperature_display
+
+- id: era5land_temperature_min_weekly
+  name: Weekly minimum 2m air temperature (ERA5-Land)
+  short_name: Minimum temperature
+  description: Minimum of ERA5-Land daily minimum temperatures in each complete ISO week.
+  standard_name: air_temperature
+  variable: t2m_min
+  period_type: weekly
+  sync: {kind: temporal, execution: append}
+  extents:
+    spatial: {bbox: [-180, -90, 180, 90]}
+    temporal: {begin: "1950-01-02", resolution: P1W}
+  ingestion:
+    plugin: datasets.drc_weekly.ERA5LandTemperatureMinWeeklyPlugin
+  units: degC
+  cell_methods: "time: minimum"
+  resolution: 9 km x 9 km
+  source: ERA5-Land daily statistics
+  source_url: https://cds.climate.copernicus.eu/datasets/derived-era5-land-daily-statistics
+  license: *copernicus_license
+  providers: *copernicus_provider
+  display: *temperature_display
+
+- id: era5land_dewpoint_temperature_weekly
+  name: Weekly mean 2m dew-point temperature (ERA5-Land)
+  short_name: Dew-point temperature
+  description: Mean ERA5-Land 2m dew-point temperature for each complete ISO week.
+  standard_name: dew_point_temperature
+  variable: d2m
+  period_type: weekly
+  sync: {kind: temporal, execution: append}
+  extents:
+    spatial: {bbox: [-180, -90, 180, 90]}
+    temporal: {begin: "1950-01-02", resolution: P1W}
+  ingestion:
+    plugin: datasets.drc_weekly.ERA5LandDewpointTemperatureWeeklyPlugin
+  units: degC
+  cell_methods: "time: mean"
+  resolution: 9 km x 9 km
+  source: ERA5-Land daily statistics
+  source_url: https://cds.climate.copernicus.eu/datasets/derived-era5-land-daily-statistics
+  license: *copernicus_license
+  providers: *copernicus_provider
+  display: *temperature_display
+
+- id: era5land_relative_humidity_weekly
+  name: Weekly mean relative humidity (ERA5-Land)
+  short_name: Relative humidity
+  description: >-
+    Weekly mean relative humidity derived from ERA5-Land daily mean air and dew-point
+    temperatures with the Magnus formula.
+  standard_name: relative_humidity
+  variable: hurs
+  period_type: weekly
+  sync: {kind: temporal, execution: append}
+  extents:
+    spatial: {bbox: [-180, -90, 180, 90]}
+    temporal: {begin: "1950-01-02", resolution: P1W}
+  ingestion:
+    plugin: datasets.drc_weekly.ERA5LandRelativeHumidityWeeklyPlugin
+  units: "%"
+  cell_methods: "time: mean"
+  resolution: 9 km x 9 km
+  source: Derived from ERA5-Land daily statistics
+  source_url: https://cds.climate.copernicus.eu/datasets/derived-era5-land-daily-statistics
+  license: *copernicus_license
+  providers: *copernicus_provider
+  display: {colormap: blues, range: [0.0, 100.0], nodata: -9999.0}
+
+- id: era5heat_utci_weekly
+  name: Weekly mean UTCI (ERA5-HEAT)
+  short_name: Mean UTCI
+  description: Mean hourly Universal Thermal Climate Index for each complete ISO week.
+  variable: utci
+  period_type: weekly
+  sync: {kind: temporal, execution: append}
+  extents:
+    spatial: {bbox: [-180, -90, 180, 90]}
+    temporal: {begin: "1940-01-01", resolution: P1W}
+  ingestion:
+    plugin: datasets.drc_weekly.ERA5HeatWeeklyPlugin
+    params: {statistic: mean}
+  units: degC
+  cell_methods: "time: mean"
+  resolution: 0.25 degree x 0.25 degree
+  source: ERA5-HEAT UTCI v1.1
+  source_url: https://cds.climate.copernicus.eu/datasets/derived-utci-historical
+  license: *copernicus_license
+  providers: *copernicus_provider
+  display: &utci_display {colormap: inferno, range: [-20.0, 50.0], nodata: -9999.0}
+
+- id: era5heat_utci_max_weekly
+  name: Weekly maximum UTCI (ERA5-HEAT)
+  short_name: Maximum UTCI
+  description: Maximum hourly Universal Thermal Climate Index in each complete ISO week.
+  variable: utci_max
+  period_type: weekly
+  sync: {kind: temporal, execution: append}
+  extents:
+    spatial: {bbox: [-180, -90, 180, 90]}
+    temporal: {begin: "1940-01-01", resolution: P1W}
+  ingestion:
+    plugin: datasets.drc_weekly.ERA5HeatWeeklyPlugin
+    params: {statistic: max}
+  units: degC
+  cell_methods: "time: maximum"
+  resolution: 0.25 degree x 0.25 degree
+  source: ERA5-HEAT UTCI v1.1
+  source_url: https://cds.climate.copernicus.eu/datasets/derived-utci-historical
+  license: *copernicus_license
+  providers: *copernicus_provider
+  display: *utci_display
+
+- id: era5heat_utci_min_weekly
+  name: Weekly minimum UTCI (ERA5-HEAT)
+  short_name: Minimum UTCI
+  description: Minimum hourly Universal Thermal Climate Index in each complete ISO week.
+  variable: utci_min
+  period_type: weekly
+  sync: {kind: temporal, execution: append}
+  extents:
+    spatial: {bbox: [-180, -90, 180, 90]}
+    temporal: {begin: "1940-01-01", resolution: P1W}
+  ingestion:
+    plugin: datasets.drc_weekly.ERA5HeatWeeklyPlugin
+    params: {statistic: min}
+  units: degC
+  cell_methods: "time: minimum"
+  resolution: 0.25 degree x 0.25 degree
+  source: ERA5-HEAT UTCI v1.1
+  source_url: https://cds.climate.copernicus.eu/datasets/derived-utci-historical
+  license: *copernicus_license
+  providers: *copernicus_provider
+  display: *utci_display
+
+- id: modis_ndvi_weekly
+  name: Weekly NDVI (MODIS Terra)
+  short_name: NDVI
+  description: >-
+    Weekly NDVI derived from Terra MOD13A1 16-day composites. Overlapping composites are
+    weighted by their number of days in the ISO week and resampled to 0.01 degrees.
+  variable: ndvi
+  period_type: weekly
+  sync: {kind: temporal, execution: append}
+  extents:
+    spatial: {bbox: [-180, -90, 180, 90]}
+    temporal: {begin: "2000-02-21", resolution: P1W}
+  ingestion:
+    plugin: datasets.drc_weekly.MODISVegetationWeeklyPlugin
+    params: {index: ndvi, resolution_degrees: 0.01}
+  units: "1"
+  cell_methods: "time: mean"
+  resolution: 0.01 degree x 0.01 degree
+  source: MODIS MOD13A1.061 via Microsoft Planetary Computer
+  source_url: https://planetarycomputer.microsoft.com/dataset/modis-13A1-061
+  license: CC0-1.0
+  providers: &modis_providers
+    - {name: NASA LP DAAC, url: https://lpdaac.usgs.gov/products/mod13a1v061/}
+    - {name: Microsoft Planetary Computer, url: https://planetarycomputer.microsoft.com/}
+  display: &vegetation_display {colormap: YlGn, range: [-0.2, 1.0], nodata: -9999.0}
+
+- id: modis_evi_weekly
+  name: Weekly EVI (MODIS Terra)
+  short_name: EVI
+  description: >-
+    Weekly EVI derived from Terra MOD13A1 16-day composites. Overlapping composites are
+    weighted by their number of days in the ISO week and resampled to 0.01 degrees.
+  variable: evi
+  period_type: weekly
+  sync: {kind: temporal, execution: append}
+  extents:
+    spatial: {bbox: [-180, -90, 180, 90]}
+    temporal: {begin: "2000-02-21", resolution: P1W}
+  ingestion:
+    plugin: datasets.drc_weekly.MODISVegetationWeeklyPlugin
+    params: {index: evi, resolution_degrees: 0.01}
+  units: "1"
+  cell_methods: "time: mean"
+  resolution: 0.01 degree x 0.01 degree
+  source: MODIS MOD13A1.061 via Microsoft Planetary Computer
+  source_url: https://planetarycomputer.microsoft.com/dataset/modis-13A1-061
+  license: CC0-1.0
+  providers: *modis_providers
+  display: *vegetation_display
