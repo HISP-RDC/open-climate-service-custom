@@ -2,6 +2,8 @@
 __pycache__/
 .env
 climate-service.yaml
+/earth-engine-service-account.json
+earth-engine-service-account.json
 eo_api.egg-info/
 docs/internal/
 site/

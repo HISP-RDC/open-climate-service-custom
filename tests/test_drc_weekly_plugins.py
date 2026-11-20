@@ -16,9 +16,12 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "plugins"))
 
 from datasets.drc_weekly import (  # noqa: E402
     ERA5HeatWeeklyPlugin,
+    ERA5LandTemperatureMaxWeeklyPlugin,
     MODISVegetationWeeklyPlugin,
     _complete_week_ids,
     _configure_ecmwf_datastores,
+    _EarthEngineERA5LandWeeklyPlugin,
+    _era5_daily_statistics_provider,
     _ERA5LandDailyRelativeHumidityPlugin,
     _overlap_days,
     _WeeklyFromDailyPlugin,
@@ -72,6 +75,96 @@ def test_relative_humidity_is_derived_and_bounded() -> None:
 
     assert result.hurs.item() == pytest.approx(55.1, abs=0.2)
     assert 0.0 <= result.hurs.item() <= 100.0
+
+
+def test_era5_daily_statistics_provider_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OCS_ERA5_DAILY_PROVIDER", raising=False)
+    assert _era5_daily_statistics_provider() == "cds"
+
+    monkeypatch.setenv("OCS_ERA5_DAILY_PROVIDER", "gee")
+    assert _era5_daily_statistics_provider() == "earth_engine"
+
+    monkeypatch.setenv("OCS_ERA5_DAILY_PROVIDER", "unknown")
+    with pytest.raises(ValueError, match="OCS_ERA5_DAILY_PROVIDER"):
+        _era5_daily_statistics_provider()
+
+
+def test_temperature_max_selects_earth_engine_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OCS_ERA5_DAILY_PROVIDER", "earth_engine")
+
+    plugin = ERA5LandTemperatureMaxWeeklyPlugin()
+
+    assert isinstance(plugin._delegate, _EarthEngineERA5LandWeeklyPlugin)
+    assert plugin._delegate.source_band == "temperature_2m_max"
+
+
+def test_earth_engine_builds_one_cross_month_week_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    operations: list[tuple[object, ...]] = []
+
+    class _Image:
+        def subtract(self, value: float) -> _Image:
+            operations.append(("subtract", value))
+            return self
+
+        def rename(self, value: str) -> _Image:
+            operations.append(("rename", value))
+            return self
+
+    class _Collection:
+        def filterDate(self, start: str, end: str) -> _Collection:
+            operations.append(("filterDate", start, end))
+            return self
+
+        def select(self, band: str) -> _Collection:
+            operations.append(("select", band))
+            return self
+
+        def max(self) -> _Image:
+            operations.append(("max",))
+            return _Image()
+
+    plugin = _EarthEngineERA5LandWeeklyPlugin(
+        source_band="temperature_2m_max",
+        output_variable="t2m_max",
+        reducer="max",
+        convert_kelvin=True,
+    )
+    monkeypatch.setattr(plugin, "_collection", lambda: _Collection())
+
+    plugin._weekly_image("2026-W36")
+
+    assert operations == [
+        ("filterDate", "2026-08-31", "2026-09-07"),
+        ("select", "temperature_2m_max"),
+        ("max",),
+        ("subtract", 273.15),
+        ("rename", "t2m_max"),
+    ]
+
+
+def test_earth_engine_result_is_week_stamped_and_auditable(monkeypatch: pytest.MonkeyPatch) -> None:
+    raster = xr.DataArray(
+        np.array([[31.5]], dtype=np.float32),
+        coords={"y": [-4.0], "x": [23.0]},
+        dims=("y", "x"),
+    )
+    plugin = _EarthEngineERA5LandWeeklyPlugin(
+        source_band="temperature_2m_max",
+        output_variable="t2m_max",
+        reducer="max",
+        convert_kelvin=True,
+    )
+    monkeypatch.setattr(plugin, "_weekly_image", lambda _: object())
+    monkeypatch.setattr(plugin, "_download_image", lambda _image, _bbox: raster)
+
+    result = plugin.fetch_period("2026-W36", [12.0, -14.0, 32.0, 6.0])
+
+    assert result.t2m_max.item() == pytest.approx(31.5)
+    assert str(result.t.values[0])[:10] == "2026-08-31"
+    assert result.attrs == {
+        "source_provider": "google_earth_engine",
+        "source_dataset_id": "ECMWF/ERA5_LAND/DAILY_AGGR",
+    }
 
 
 def test_era5_heat_reduces_hourly_kelvin_to_weekly_celsius() -> None:

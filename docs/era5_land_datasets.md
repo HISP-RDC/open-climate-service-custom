@@ -33,6 +33,53 @@ url: https://cds.climate.copernicus.eu/api
 key: <your-cds-api-key>
 ```
 
+### Google Earth Engine (optional weekly daily-statistics provider)
+
+Instance plugins can read weekly ERA5-Land temperature statistics from
+`ECMWF/ERA5_LAND/DAILY_AGGR` instead of asking CDS to calculate daily statistics
+on demand. CDS remains the default. Earth Engine is useful when the CDS request
+queue delays weekly maximum, minimum, mean, dew-point, or relative-humidity
+ingestion.
+
+Install the optional client alongside the server dependencies:
+
+```bash
+uv sync --extra server --extra earth-engine
+```
+
+Register a Google Cloud project for Earth Engine, enable the Earth Engine API,
+and configure a service account for unattended execution. Keep its JSON key
+outside the repository and readable only by the OCS system account:
+
+```bash
+sudo install -d -o open-climate-service -g open-climate-service -m 0700 \
+  /etc/open-climate-service
+sudo install -o open-climate-service -g open-climate-service -m 0600 \
+  /secure/path/earth-engine-service-account.json \
+  /etc/open-climate-service/earth-engine-service-account.json
+```
+
+Set the provider in the OCS environment file:
+
+```dotenv
+OCS_ERA5_DAILY_PROVIDER=earth_engine
+EARTH_ENGINE_PROJECT=your-google-cloud-project
+GOOGLE_APPLICATION_CREDENTIALS=/etc/open-climate-service/earth-engine-service-account.json
+OCS_EARTH_ENGINE_DOWNLOAD_TIMEOUT_SECONDS=300
+```
+
+The Earth Engine implementation reduces all seven days on the remote service
+and downloads one clipped GeoTIFF per ISO week on the native 0.1-degree
+ERA5-Land grid. Every produced dataset records
+`source_provider=google_earth_engine` and the Earth Engine dataset identifier in
+its attributes. Set `OCS_ERA5_DAILY_PROVIDER=cds` to return to the original CDS
+implementation; providers are never switched silently within a run.
+
+Earth Engine and CDS expose the same underlying ERA5-Land reanalysis, but a
+production switch should still compare a small overlap window before replacing
+an established source. Verify units, weekly timestamps, grid alignment, and a
+sample of aggregated organisation-unit values.
+
 ### Ingest your first ERA5-Land dataset
 
 Once authenticated, ingest ERA5-Land daily temperature:

@@ -11,13 +11,17 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import json
+import logging
 import netrc
 import os
+import shutil
 import tempfile
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from typing import Any, Literal, cast
+from urllib.request import Request, urlopen
 
 import numpy as np
 import xarray as xr
@@ -40,13 +44,19 @@ from open_climate_service.transforms.unit_conversion import kelvin_to_celsius
 
 _Reducer = Literal["sum", "mean", "max", "min"]
 _ERA5_HEAT_ARCO_URL = (
-    "https://arco.datastores.ecmwf.int/cadl-arco-time-004/"
-    "arco/derived_utci_historical/all/timeChunked.zarr"
+    "https://arco.datastores.ecmwf.int/cadl-arco-time-004/arco/derived_utci_historical/all/timeChunked.zarr"
 )
 _MODIS_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 _MODIS_COLLECTION = "modis-13A1-061"
 _MODIS_BEGIN = date(2000, 2, 18)
 _CDS_API_URL = "https://cds.climate.copernicus.eu/api"
+_EARTH_ENGINE_ERA5_LAND_DAILY = "ECMWF/ERA5_LAND/DAILY_AGGR"
+_EARTH_ENGINE_ERA5_LAND_CRS = "EPSG:4326"
+_EARTH_ENGINE_ERA5_LAND_TRANSFORM = [0.1, 0.0, -180.05, 0.0, -0.1, 90.05]
+_EARTH_ENGINE_INITIALIZATION_LOCK = Lock()
+_earth_engine_initialized_project: str | None = None
+
+logger = logging.getLogger(__name__)
 
 
 def _week_monday(value: str) -> date:
@@ -189,6 +199,30 @@ class _WeeklyFromDailyPlugin(BaseDatasetPlugin):
             close()
 
 
+class _DelegatingWeeklyPlugin(BaseDatasetPlugin):
+    """Expose one configured weekly provider through the streaming protocol."""
+
+    max_concurrency = 1
+    commit_batch_size = 4
+
+    def __init__(self, delegate: BaseDatasetPlugin) -> None:
+        self._delegate = delegate
+
+    async def periods(self, start: str, end: str) -> list[str]:
+        return await self._delegate.periods(start, end)
+
+    def fetch_period(self, period_id: str, bbox: list[float], **params: Any) -> xr.Dataset:
+        result = self._delegate.fetch_period(period_id, bbox, **params)
+        if not isinstance(result, xr.Dataset):
+            raise TypeError("Weekly provider returned an awaitable to a synchronous plugin")
+        return result
+
+    def close(self) -> None:
+        close = getattr(self._delegate, "close", None)
+        if callable(close):
+            close()
+
+
 class CHIRPS3PrecipitationWeeklyPlugin(_WeeklyFromDailyPlugin):
     """CHIRPS3 weekly precipitation total in millimetres."""
 
@@ -206,17 +240,209 @@ class ERA5LandPrecipitationWeeklyPlugin(_WeeklyFromDailyPlugin):
         super().__init__(source, "tp", "tp", "sum")
 
 
-class ERA5LandTemperatureWeeklyPlugin(_WeeklyFromDailyPlugin):
+def _era5_daily_statistics_provider() -> Literal["cds", "earth_engine"]:
+    """Return the explicitly configured ERA5-Land daily statistics provider."""
+    configured = os.getenv("OCS_ERA5_DAILY_PROVIDER", "cds").strip().lower().replace("-", "_")
+    aliases = {"gee": "earth_engine", "earthengine": "earth_engine"}
+    provider = aliases.get(configured, configured)
+    if provider not in {"cds", "earth_engine"}:
+        raise ValueError("OCS_ERA5_DAILY_PROVIDER must be either 'cds' or 'earth_engine'")
+    return cast(Literal["cds", "earth_engine"], provider)
+
+
+def _positive_float_environment(name: str, default: float) -> float:
+    """Read a positive floating-point setting from the environment."""
+    raw = os.getenv(name, "").strip()
+    value = float(raw) if raw else default
+    if value <= 0:
+        raise ValueError(f"{name} must be greater than zero")
+    return value
+
+
+def _earth_engine_client() -> Any:
+    """Initialize and return the Earth Engine module for unattended use."""
+    global _earth_engine_initialized_project
+
+    try:
+        import ee
+    except ImportError as error:
+        raise RuntimeError(
+            "Earth Engine support is not installed. Install the 'earth-engine' optional dependency."
+        ) from error
+
+    credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+    project = os.getenv("EARTH_ENGINE_PROJECT", "").strip() or os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+    service_account = os.getenv("EARTH_ENGINE_SERVICE_ACCOUNT", "").strip()
+    credentials: Any | None = None
+
+    if credentials_path:
+        path = Path(credentials_path).expanduser()
+        if not path.is_file():
+            raise RuntimeError(f"Google service-account credentials do not exist: {path}")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise RuntimeError("Google service-account credentials must contain a JSON object")
+        service_account = service_account or str(payload.get("client_email", "")).strip()
+        project = project or str(payload.get("project_id", "")).strip()
+        if not service_account:
+            raise RuntimeError("Google service-account credentials do not contain client_email")
+        credentials = ee.ServiceAccountCredentials(service_account, str(path))
+
+    if not project:
+        raise RuntimeError(
+            "Earth Engine requires EARTH_ENGINE_PROJECT or GOOGLE_CLOUD_PROJECT to identify the Cloud project"
+        )
+
+    with _EARTH_ENGINE_INITIALIZATION_LOCK:
+        if _earth_engine_initialized_project != project:
+            if credentials is None:
+                ee.Initialize(project=project)
+            else:
+                ee.Initialize(credentials, project=project)
+            _earth_engine_initialized_project = project
+            logger.info("Earth Engine initialized for ERA5-Land daily statistics | project=%s", project)
+    return ee
+
+
+class _EarthEngineERA5LandWeeklyPlugin(BaseDatasetPlugin):
+    """Aggregate one ERA5-Land ISO week on Earth Engine and download one GeoTIFF."""
+
+    max_concurrency = 1
+    commit_batch_size = 4
+
+    def __init__(
+        self,
+        source_band: str | None,
+        output_variable: str,
+        reducer: Literal["mean", "max", "min"],
+        *,
+        convert_kelvin: bool = False,
+        relative_humidity: bool = False,
+    ) -> None:
+        if source_band is None and not relative_humidity:
+            raise ValueError("An Earth Engine source band is required unless relative humidity is requested")
+        self.source_band = source_band
+        self.output_variable = output_variable
+        self.reducer = reducer
+        self.convert_kelvin = convert_kelvin
+        self.relative_humidity = relative_humidity
+        self._latest_date: date | None = None
+
+    def _collection(self) -> Any:
+        ee = _earth_engine_client()
+        return ee.ImageCollection(_EARTH_ENGINE_ERA5_LAND_DAILY)
+
+    def _latest_available(self) -> date:
+        if self._latest_date is None:
+            latest = self._collection().aggregate_max("system:time_start").getInfo()
+            if latest is None:
+                raise RuntimeError(f"Earth Engine dataset {_EARTH_ENGINE_ERA5_LAND_DAILY} is empty")
+            self._latest_date = datetime.fromtimestamp(float(latest) / 1000.0, tz=UTC).date()
+        return self._latest_date
+
+    async def periods(self, start: str, end: str) -> list[str]:
+        cutoff = await asyncio.to_thread(self._latest_available)
+        return _complete_week_ids(start, end, cutoff)
+
+    def _relative_humidity_image(self, collection: Any) -> Any:
+        ee = _earth_engine_client()
+
+        def daily_relative_humidity(source: Any) -> Any:
+            image = ee.Image(source)
+            air = image.select("temperature_2m").subtract(273.15)
+            dewpoint = image.select("dewpoint_temperature_2m").subtract(273.15)
+            air_term = air.multiply(17.625).divide(air.add(243.04))
+            dewpoint_term = dewpoint.multiply(17.625).divide(dewpoint.add(243.04))
+            return dewpoint_term.subtract(air_term).exp().multiply(100.0).clamp(0.0, 100.0).rename("hurs")
+
+        return collection.map(daily_relative_humidity).mean()
+
+    def _weekly_image(self, period_id: str) -> Any:
+        monday = _week_monday(period_id)
+        end_exclusive = monday + timedelta(days=7)
+        collection = self._collection().filterDate(monday.isoformat(), end_exclusive.isoformat())
+        if self.relative_humidity:
+            image = self._relative_humidity_image(collection)
+        else:
+            assert self.source_band is not None
+            selected = collection.select(self.source_band)
+            if self.reducer == "mean":
+                image = selected.mean()
+            elif self.reducer == "max":
+                image = selected.max()
+            else:
+                image = selected.min()
+            if self.convert_kelvin:
+                image = image.subtract(273.15)
+        return image.rename(self.output_variable)
+
+    def _download_image(self, image: Any, bbox: list[float]) -> xr.DataArray:
+        if len(bbox) != 4:
+            raise ValueError("Earth Engine downloads require a four-value bounding box")
+        xmin, ymin, xmax, ymax = map(float, bbox)
+        ee = _earth_engine_client()
+        region = ee.Geometry.Rectangle([xmin, ymin, xmax, ymax], proj="EPSG:4326", geodesic=False)
+        timeout = _positive_float_environment("OCS_EARTH_ENGINE_DOWNLOAD_TIMEOUT_SECONDS", 300.0)
+        url = image.getDownloadURL(
+            {
+                "region": region,
+                "crs": _EARTH_ENGINE_ERA5_LAND_CRS,
+                "crs_transform": _EARTH_ENGINE_ERA5_LAND_TRANSFORM,
+                "format": "GEO_TIFF",
+            }
+        )
+        request = Request(str(url), headers={"User-Agent": "open-climate-service/0.1"})
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "era5land_weekly.tif"
+            with urlopen(request, timeout=timeout) as response, target.open("wb") as destination:
+                shutil.copyfileobj(response, destination)
+
+            import rioxarray
+
+            source = cast(xr.DataArray, rioxarray.open_rasterio(target, masked=True))
+            try:
+                raster = source.load()
+            finally:
+                source.close()
+        if "band" in raster.dims:
+            if raster.sizes["band"] != 1:
+                raise RuntimeError(f"Earth Engine returned {raster.sizes['band']} bands; expected one")
+            raster = raster.squeeze("band", drop=True)
+        return raster.astype("float32")
+
+    def fetch_period(self, period_id: str, bbox: list[float], **_: Any) -> xr.Dataset:
+        raster = self._download_image(self._weekly_image(period_id), bbox)
+        monday = np.datetime64(_week_monday(period_id).isoformat(), "D").astype("datetime64[ns]")
+        result = raster.expand_dims(t=[monday]).to_dataset(name=self.output_variable)
+        result.attrs.update(
+            {
+                "source_provider": "google_earth_engine",
+                "source_dataset_id": _EARTH_ENGINE_ERA5_LAND_DAILY,
+            }
+        )
+        return result
+
+
+class ERA5LandTemperatureWeeklyPlugin(_DelegatingWeeklyPlugin):
     """ERA5-Land weekly mean 2-metre air temperature."""
 
     def __init__(self, **_: Any) -> None:
         """Build the weekly reducer around ERA5-Land daily mean temperature."""
-        source: BaseDatasetPlugin
-        if _edh_credentials_available():
-            source = _CachedERA5LandTempDaily(variable="t2m")
+        if _era5_daily_statistics_provider() == "earth_engine":
+            delegate: BaseDatasetPlugin = _EarthEngineERA5LandWeeklyPlugin(
+                source_band="temperature_2m",
+                output_variable="t2m",
+                reducer="mean",
+                convert_kelvin=True,
+            )
         else:
-            source = _ERA5LandDailyStatisticPlugin("t2m", "mean")
-        super().__init__(source, "t2m", "t2m", "mean")
+            source: BaseDatasetPlugin
+            if _edh_credentials_available():
+                source = _CachedERA5LandTempDaily(variable="t2m")
+            else:
+                source = _ERA5LandDailyStatisticPlugin("t2m", "mean")
+            delegate = _WeeklyFromDailyPlugin(source, "t2m", "t2m", "mean")
+        super().__init__(delegate)
 
 
 class _ERA5LandDailyStatisticPlugin(BaseDatasetPlugin):
@@ -282,31 +508,58 @@ class _ERA5LandDailyStatisticPlugin(BaseDatasetPlugin):
         return kelvin_to_celsius(dataset, {"variable": self.variable})
 
 
-class ERA5LandTemperatureMaxWeeklyPlugin(_WeeklyFromDailyPlugin):
+class ERA5LandTemperatureMaxWeeklyPlugin(_DelegatingWeeklyPlugin):
     """ERA5-Land maximum 2-metre air temperature observed during a week."""
 
     def __init__(self, **_: Any) -> None:
         """Build the weekly reducer for maximum temperature."""
-        source = _ERA5LandDailyStatisticPlugin("t2m", "max")
-        super().__init__(source, "t2m", "t2m_max", "max")
+        if _era5_daily_statistics_provider() == "earth_engine":
+            delegate: BaseDatasetPlugin = _EarthEngineERA5LandWeeklyPlugin(
+                source_band="temperature_2m_max",
+                output_variable="t2m_max",
+                reducer="max",
+                convert_kelvin=True,
+            )
+        else:
+            source = _ERA5LandDailyStatisticPlugin("t2m", "max")
+            delegate = _WeeklyFromDailyPlugin(source, "t2m", "t2m_max", "max")
+        super().__init__(delegate)
 
 
-class ERA5LandTemperatureMinWeeklyPlugin(_WeeklyFromDailyPlugin):
+class ERA5LandTemperatureMinWeeklyPlugin(_DelegatingWeeklyPlugin):
     """ERA5-Land minimum 2-metre air temperature observed during a week."""
 
     def __init__(self, **_: Any) -> None:
         """Build the weekly reducer for minimum temperature."""
-        source = _ERA5LandDailyStatisticPlugin("t2m", "min")
-        super().__init__(source, "t2m", "t2m_min", "min")
+        if _era5_daily_statistics_provider() == "earth_engine":
+            delegate: BaseDatasetPlugin = _EarthEngineERA5LandWeeklyPlugin(
+                source_band="temperature_2m_min",
+                output_variable="t2m_min",
+                reducer="min",
+                convert_kelvin=True,
+            )
+        else:
+            source = _ERA5LandDailyStatisticPlugin("t2m", "min")
+            delegate = _WeeklyFromDailyPlugin(source, "t2m", "t2m_min", "min")
+        super().__init__(delegate)
 
 
-class ERA5LandDewpointTemperatureWeeklyPlugin(_WeeklyFromDailyPlugin):
+class ERA5LandDewpointTemperatureWeeklyPlugin(_DelegatingWeeklyPlugin):
     """ERA5-Land weekly mean 2-metre dew-point temperature."""
 
     def __init__(self, **_: Any) -> None:
         """Build the weekly reducer for mean dew-point temperature."""
-        source = _ERA5LandDailyStatisticPlugin("d2m", "mean")
-        super().__init__(source, "d2m", "d2m", "mean")
+        if _era5_daily_statistics_provider() == "earth_engine":
+            delegate: BaseDatasetPlugin = _EarthEngineERA5LandWeeklyPlugin(
+                source_band="dewpoint_temperature_2m",
+                output_variable="d2m",
+                reducer="mean",
+                convert_kelvin=True,
+            )
+        else:
+            source = _ERA5LandDailyStatisticPlugin("d2m", "mean")
+            delegate = _WeeklyFromDailyPlugin(source, "d2m", "d2m", "mean")
+        super().__init__(delegate)
 
 
 class _ERA5LandDailyRelativeHumidityPlugin(BaseDatasetPlugin):
@@ -340,12 +593,26 @@ class _ERA5LandDailyRelativeHumidityPlugin(BaseDatasetPlugin):
         return humidity.to_dataset(name="hurs")
 
 
-class ERA5LandRelativeHumidityWeeklyPlugin(_WeeklyFromDailyPlugin):
+class ERA5LandRelativeHumidityWeeklyPlugin(_DelegatingWeeklyPlugin):
     """ERA5-Land weekly mean relative humidity derived from temperature and dew point."""
 
     def __init__(self, **_: Any) -> None:
         """Build the weekly reducer for derived daily relative humidity."""
-        super().__init__(_ERA5LandDailyRelativeHumidityPlugin(), "hurs", "hurs", "mean")
+        if _era5_daily_statistics_provider() == "earth_engine":
+            delegate: BaseDatasetPlugin = _EarthEngineERA5LandWeeklyPlugin(
+                source_band=None,
+                output_variable="hurs",
+                reducer="mean",
+                relative_humidity=True,
+            )
+        else:
+            delegate = _WeeklyFromDailyPlugin(
+                _ERA5LandDailyRelativeHumidityPlugin(),
+                "hurs",
+                "hurs",
+                "mean",
+            )
+        super().__init__(delegate)
 
 
 def _read_yaml_key(path: Path) -> str:
@@ -376,11 +643,7 @@ def _cds_api_key() -> str:
 
 def _configure_ecmwf_datastores() -> tuple[str, str]:
     """Bridge the project's CDS variables to ecmwf-datastores-client."""
-    url = (
-        os.getenv("ECMWF_DATASTORES_URL", "").strip()
-        or os.getenv("CDSAPI_URL", "").strip()
-        or _CDS_API_URL
-    )
+    url = os.getenv("ECMWF_DATASTORES_URL", "").strip() or os.getenv("CDSAPI_URL", "").strip() or _CDS_API_URL
     token = _cds_api_key()
     if not os.getenv("ECMWF_DATASTORES_URL", "").strip():
         os.environ["ECMWF_DATASTORES_URL"] = url
@@ -557,10 +820,7 @@ class MODISVegetationWeeklyPlugin(BaseDatasetPlugin):
                 .search(
                     collections=[_MODIS_COLLECTION],
                     bbox=bbox,
-                    datetime=(
-                        f"{search_start.isoformat()}T00:00:00Z/"
-                        f"{effective_end.isoformat()}T23:59:59Z"
-                    ),
+                    datetime=(f"{search_start.isoformat()}T00:00:00Z/{effective_end.isoformat()}T23:59:59Z"),
                 )
                 .items()
             )
@@ -607,9 +867,7 @@ class MODISVegetationWeeklyPlugin(BaseDatasetPlugin):
         ).load()
         raw = cube[asset].astype("float32")
         quality = cube[self._quality_asset]
-        values = (raw * np.float32(0.0001)).where(
-            ((quality == 0) | (quality == 1)) & (raw >= -2000) & (raw <= 10000)
-        )
+        values = (raw * np.float32(0.0001)).where(((quality == 0) | (quality == 1)) & (raw >= -2000) & (raw <= 10000))
 
         intervals = {_item_interval(item)[0]: _item_interval(item) for item in terra}
         weights: list[float] = []
